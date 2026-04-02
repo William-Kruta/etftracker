@@ -1,0 +1,17 @@
+[project]
+name = "etftracker"
+version = "0.1.0"
+description = "ETF holdings scraper"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=3.0.2",
+    "selenium>=4.41.0",
+    "lxml>=6.0.2",
+    "duckdb>=1.5.1",
+]
+[project.scripts]
+yahoors = "etftracker.etftracker:get_etf_holdings"
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
