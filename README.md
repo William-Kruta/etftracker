@@ -34,7 +34,7 @@ pip install etftracker
 
 ```python
 import datetime as dt
-from etftracker.etftracker import get_etf_holdings
+from etftracker import get_etf_holdings
 
 df = get_etf_holdings("SPY", stale_threshold=dt.timedelta(days=7))
 print(df.head())
@@ -43,7 +43,7 @@ print(df.head())
 Fetch multiple ETFs:
 
 ```python
-from etftracker.etftracker import get_etf_holdings
+from etftracker import get_etf_holdings
 
 df = get_etf_holdings(["SPY", "VTI", "VOO"])
 print(df[["etf_ticker", "symbol", "name"]].head())
@@ -54,7 +54,7 @@ print(df[["etf_ticker", "symbol", "name"]].head())
 Read holdings for a single ETF:
 
 ```python
-from etftracker.db import read_holdings
+from etftracker import read_holdings
 
 df = read_holdings("SPY")
 ```
@@ -62,7 +62,7 @@ df = read_holdings("SPY")
 Delete a single holding:
 
 ```python
-from etftracker.db import delete_holding
+from etftracker import delete_holding
 
 deleted = delete_holding("SPY", "AAPL")
 print(deleted)
@@ -71,8 +71,7 @@ print(deleted)
 Save a freshly scraped dataframe manually:
 
 ```python
-from etftracker.scraper import pipeline
-from etftracker.db import save_holdings
+from etftracker import pipeline, save_holdings
 
 df = pipeline("SPY")
 save_holdings(df, "SPY")
