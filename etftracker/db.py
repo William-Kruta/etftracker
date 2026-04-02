@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import platform
@@ -90,17 +92,13 @@ def _parse_percent(value: str) -> float | None:
         return None
 
 
-def _to_pandas(df: pd.DataFrame | pl.DataFrame) -> pd.DataFrame:
-    if isinstance(df, pl.DataFrame):
-        return df.to_pandas()
+def _to_pandas(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df, pd.DataFrame):
         return df.copy()
     raise TypeError("df must be a pandas.DataFrame or polars.DataFrame")
 
 
-def normalize_holdings_frame(
-    df: pd.DataFrame | pl.DataFrame, etf_symbol: str
-) -> pd.DataFrame:
+def normalize_holdings_frame(df: pd.DataFrame, etf_symbol: str) -> pd.DataFrame:
     holdings = _to_pandas(df)
     required_columns = ["symbol", "name", "weight", "shares_owned", "shares_value"]
     missing = [column for column in required_columns if column not in holdings.columns]
@@ -163,7 +161,7 @@ def create_holdings_table(
 
 
 def save_holdings(
-    df: pd.DataFrame | pl.DataFrame,
+    df: pd.DataFrame,
     etf_symbol: str,
     db_path: str | Path | None = None,
     table_name: str = TABLE_NAME,

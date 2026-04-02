@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 import math
 import pandas as pd
@@ -74,7 +76,7 @@ def _next_page(driver: webdriver, page_index: int, pages_per_row: int = 6):
     return True
 
 
-def pipeline(etf_symbol: str, wait_time: int = 5, debug: bool = True) -> pl.DataFrame:
+def pipeline(etf_symbol: str, wait_time: int = 5, debug: bool = True) -> pd.DataFrame:
     ### Step 1 ###
     # Create a driver object.
     driver, wait = _create_driver(wait_time=wait_time)
