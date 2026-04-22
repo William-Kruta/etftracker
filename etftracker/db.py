@@ -13,6 +13,7 @@ CONFIG_DIR = "etftracker"
 CONFIG_FILE = "config.json"
 DEFAULT_DB = "etftracker.duckdb"
 TABLE_NAME = "etf_holdings"
+COMPANY_TABLE_NAME = "companies"
 
 
 def _get_config_dir() -> Path:
@@ -106,6 +107,8 @@ def normalize_holdings_frame(df: pd.DataFrame, etf_symbol: str) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {missing}")
 
     normalized = holdings.loc[:, required_columns].copy()
+    normalized["symbol"] = normalized["symbol"].astype(str).str.strip().str.upper()
+    normalized["name"] = normalized["name"].astype(str).str.strip()
     normalized["etf_ticker"] = etf_symbol.upper()
     normalized["collected_at"] = pd.Timestamp.utcnow()
     normalized["weight_pct"] = normalized["weight"].map(_parse_percent)
@@ -139,25 +142,143 @@ def get_connection(db_path: str | Path | None = None) -> duckdb.DuckDBPyConnecti
 
 
 def create_holdings_table(
-    conn: duckdb.DuckDBPyConnection, table_name: str = TABLE_NAME
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str = TABLE_NAME,
+    company_table_name: str = COMPANY_TABLE_NAME,
 ) -> None:
+    _migrate_legacy_holdings_table(
+        conn=conn, table_name=table_name, company_table_name=company_table_name
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {company_table_name} (
+            symbol TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )
+        """
+    )
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
             etf_ticker TEXT NOT NULL,
             collected_at TIMESTAMP NOT NULL,
             symbol TEXT NOT NULL,
-            name TEXT NOT NULL,
             weight TEXT,
             weight_pct DOUBLE,
             shares_owned TEXT,
             shares_owned_num DOUBLE,
             shares_value TEXT,
             shares_value_num DOUBLE,
-            PRIMARY KEY (etf_ticker, symbol)
+            PRIMARY KEY (etf_ticker, collected_at, symbol),
+            FOREIGN KEY (symbol) REFERENCES {company_table_name}(symbol)
         )
         """
     )
+
+
+def _table_exists(conn: duckdb.DuckDBPyConnection, table_name: str) -> bool:
+    result = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_name = ?
+        """,
+        [table_name],
+    )
+    return result.fetchone()[0] > 0
+
+
+def _table_columns(conn: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
+    if not _table_exists(conn=conn, table_name=table_name):
+        return []
+
+    result = conn.execute(f"PRAGMA table_info('{table_name}')")
+    return [row[1] for row in result.fetchall()]
+
+
+def _migrate_legacy_holdings_table(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+    company_table_name: str,
+) -> None:
+    columns = _table_columns(conn=conn, table_name=table_name)
+    if not columns or "name" not in columns:
+        return
+
+    backup_table_name = f"{table_name}_legacy"
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {company_table_name} (
+                symbol TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO {company_table_name} (symbol, name)
+            SELECT
+                UPPER(TRIM(symbol)) AS symbol,
+                MAX(COALESCE(NULLIF(TRIM(name), ''), UPPER(TRIM(symbol)))) AS name
+            FROM {table_name}
+            WHERE symbol IS NOT NULL
+                AND TRIM(symbol) != ''
+            GROUP BY UPPER(TRIM(symbol))
+            """
+        )
+        conn.execute(f"ALTER TABLE {table_name} RENAME TO {backup_table_name}")
+        conn.execute(
+            f"""
+            CREATE TABLE {table_name} (
+                etf_ticker TEXT NOT NULL,
+                collected_at TIMESTAMP NOT NULL,
+                symbol TEXT NOT NULL,
+                weight TEXT,
+                weight_pct DOUBLE,
+                shares_owned TEXT,
+                shares_owned_num DOUBLE,
+                shares_value TEXT,
+                shares_value_num DOUBLE,
+                PRIMARY KEY (etf_ticker, collected_at, symbol),
+                FOREIGN KEY (symbol) REFERENCES {company_table_name}(symbol)
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO {table_name} (
+                etf_ticker,
+                collected_at,
+                symbol,
+                weight,
+                weight_pct,
+                shares_owned,
+                shares_owned_num,
+                shares_value,
+                shares_value_num
+            )
+            SELECT
+                UPPER(TRIM(etf_ticker)) AS etf_ticker,
+                collected_at,
+                UPPER(TRIM(symbol)) AS symbol,
+                weight,
+                weight_pct,
+                shares_owned,
+                shares_owned_num,
+                shares_value,
+                shares_value_num
+            FROM {backup_table_name}
+            WHERE symbol IS NOT NULL
+                AND TRIM(symbol) != ''
+            """
+        )
+        conn.execute(f"DROP TABLE {backup_table_name}")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def save_holdings(
@@ -165,19 +286,31 @@ def save_holdings(
     etf_symbol: str,
     db_path: str | Path | None = None,
     table_name: str = TABLE_NAME,
+    company_table_name: str = COMPANY_TABLE_NAME,
 ) -> int:
     normalized = normalize_holdings_frame(df=df, etf_symbol=etf_symbol)
     conn = get_connection(db_path=db_path)
     try:
-        create_holdings_table(conn=conn, table_name=table_name)
+        create_holdings_table(
+            conn=conn, table_name=table_name, company_table_name=company_table_name
+        )
         conn.register("holdings_df", normalized)
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO {company_table_name} (symbol, name)
+            SELECT
+                symbol,
+                MAX(COALESCE(NULLIF(name, ''), symbol)) AS name
+            FROM holdings_df
+            GROUP BY symbol
+            """
+        )
         conn.execute(
             f"""
             INSERT OR REPLACE INTO {table_name} (
                 etf_ticker,
                 collected_at,
                 symbol,
-                name,
                 weight,
                 weight_pct,
                 shares_owned,
@@ -189,7 +322,6 @@ def save_holdings(
                 etf_ticker,
                 collected_at,
                 symbol,
-                name,
                 weight,
                 weight_pct,
                 shares_owned,
@@ -209,12 +341,72 @@ def read_holdings(
     etf_ticker: str,
     db_path: str | Path | None = None,
     table_name: str = TABLE_NAME,
+    company_table_name: str = COMPANY_TABLE_NAME,
 ) -> pd.DataFrame:
     conn = get_connection(db_path=db_path)
     try:
-        create_holdings_table(conn=conn, table_name=table_name)
+        create_holdings_table(
+            conn=conn, table_name=table_name, company_table_name=company_table_name
+        )
         result = conn.execute(
-            f"SELECT * FROM {table_name} WHERE etf_ticker = ? ORDER BY collected_at DESC",
+            f"""
+            SELECT
+                h.etf_ticker,
+                h.collected_at,
+                h.symbol,
+                c.name,
+                h.weight,
+                h.weight_pct,
+                h.shares_owned,
+                h.shares_owned_num,
+                h.shares_value,
+                h.shares_value_num
+            FROM {table_name} h
+            JOIN {company_table_name} c ON h.symbol = c.symbol
+            WHERE h.etf_ticker = ?
+                AND h.collected_at = (
+                    SELECT MAX(collected_at)
+                    FROM {table_name}
+                    WHERE etf_ticker = ?
+                )
+            ORDER BY h.weight_pct DESC NULLS LAST, h.symbol
+            """,
+            [etf_ticker.upper(), etf_ticker.upper()],
+        )
+        return result.fetch_df()
+    finally:
+        conn.close()
+
+
+def read_holdings_history(
+    etf_ticker: str,
+    db_path: str | Path | None = None,
+    table_name: str = TABLE_NAME,
+    company_table_name: str = COMPANY_TABLE_NAME,
+) -> pd.DataFrame:
+    conn = get_connection(db_path=db_path)
+    try:
+        create_holdings_table(
+            conn=conn, table_name=table_name, company_table_name=company_table_name
+        )
+        result = conn.execute(
+            f"""
+            SELECT
+                h.etf_ticker,
+                h.collected_at,
+                h.symbol,
+                c.name,
+                h.weight,
+                h.weight_pct,
+                h.shares_owned,
+                h.shares_owned_num,
+                h.shares_value,
+                h.shares_value_num
+            FROM {table_name} h
+            JOIN {company_table_name} c ON h.symbol = c.symbol
+            WHERE h.etf_ticker = ?
+            ORDER BY h.collected_at DESC, h.weight_pct DESC NULLS LAST, h.symbol
+            """,
             [etf_ticker.upper()],
         )
         return result.fetch_df()
@@ -222,19 +414,89 @@ def read_holdings(
         conn.close()
 
 
+def _delete_holdings_by_where(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+    where_clause: str = "",
+    params: list[str] | tuple[str, ...] = (),
+) -> int:
+    count_query = f"SELECT COUNT(*) FROM {table_name} {where_clause}"
+    count = conn.execute(count_query, params).fetchone()[0]
+    if count:
+        conn.execute(f"DELETE FROM {table_name} {where_clause}", params)
+    return int(count)
+
+
 def delete_holding(
     etf_ticker: str,
     symbol: str,
     db_path: str | Path | None = None,
     table_name: str = TABLE_NAME,
+    company_table_name: str = COMPANY_TABLE_NAME,
 ) -> int:
     conn = get_connection(db_path=db_path)
     try:
-        create_holdings_table(conn=conn, table_name=table_name)
-        result = conn.execute(
-            f"DELETE FROM {table_name} WHERE etf_ticker = ? AND symbol = ?",
-            [etf_ticker.upper(), symbol.upper()],
+        create_holdings_table(
+            conn=conn, table_name=table_name, company_table_name=company_table_name
         )
-        return result.rowcount
+        return _delete_holdings_by_where(
+            conn=conn,
+            table_name=table_name,
+            where_clause="WHERE UPPER(TRIM(etf_ticker)) = ? AND UPPER(TRIM(symbol)) = ?",
+            params=[etf_ticker.strip().upper(), symbol.strip().upper()],
+        )
     finally:
         conn.close()
+
+
+def delete_etf_holdings(
+    etf_symbols: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    db_path: str | Path | None = None,
+    table_name: str = TABLE_NAME,
+    company_table_name: str = COMPANY_TABLE_NAME,
+) -> int:
+    conn = get_connection(db_path=db_path)
+    try:
+        create_holdings_table(
+            conn=conn, table_name=table_name, company_table_name=company_table_name
+        )
+        if etf_symbols is None:
+            return _delete_holdings_by_where(conn=conn, table_name=table_name)
+
+        if isinstance(etf_symbols, str):
+            normalized_symbols = [etf_symbols.strip().upper()]
+        else:
+            normalized_symbols = []
+            seen: set[str] = set()
+            for symbol in etf_symbols:
+                normalized = str(symbol).strip().upper()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                normalized_symbols.append(normalized)
+
+        if not normalized_symbols:
+            return 0
+
+        placeholders = ", ".join(["?"] * len(normalized_symbols))
+        return _delete_holdings_by_where(
+            conn=conn,
+            table_name=table_name,
+            where_clause=f"WHERE UPPER(TRIM(etf_ticker)) IN ({placeholders})",
+            params=normalized_symbols,
+        )
+    finally:
+        conn.close()
+
+
+def delete_all_holdings(
+    db_path: str | Path | None = None,
+    table_name: str = TABLE_NAME,
+    company_table_name: str = COMPANY_TABLE_NAME,
+) -> int:
+    return delete_etf_holdings(
+        etf_symbols=None,
+        db_path=db_path,
+        table_name=table_name,
+        company_table_name=company_table_name,
+    )

@@ -9,10 +9,12 @@ the results, and storing the holdings in a local DuckDB database for reuse.
   `shares_owned`, and `shares_value`.
 - Normalizes holdings data into a consistent schema with `etf_ticker` and
   `collected_at`.
+- Stores companies separately from ETF holdings so repeated company metadata is
+  not copied for every ETF.
 - Stores holdings in DuckDB with parsed numeric fields for percentages, share
   counts, and dollar values.
-- Uses `PRIMARY KEY (etf_ticker, symbol)` so each ETF/holding pair is stored
-  once and can be refreshed in place.
+- Uses `PRIMARY KEY (etf_ticker, collected_at, symbol)` so ETF holdings can be
+  tracked historically across scrape runs.
 - Reads holdings back from DuckDB with a simple ETF ticker filter.
 - Deletes individual holdings rows by `etf_ticker` and `symbol`.
 - Refreshes stale data automatically based on a configurable `stale_threshold`.
@@ -22,6 +24,28 @@ the results, and storing the holdings in a local DuckDB database for reuse.
 
 ```
 pip install etftracker
+```
+
+## Command Line
+
+After installation, the package exposes an `etftracker` command.
+
+Fetch one ticker and print the normalized holdings to stdout:
+
+```bash
+etftracker SPY --headless
+```
+
+Fetch multiple tickers and write the result to CSV:
+
+```bash
+etftracker SPY VTI VOO --headless --csv holdings.csv
+```
+
+Force a fresh scrape instead of using cached database rows:
+
+```bash
+etftracker SPY --headless --force-update
 ```
 
 ## Requirements
@@ -59,12 +83,38 @@ from etftracker import read_holdings
 df = read_holdings("SPY")
 ```
 
+Read historical holdings for a single ETF:
+
+```python
+from etftracker import read_holdings_history
+
+df = read_holdings_history("SPY")
+```
+
 Delete a single holding:
 
 ```python
 from etftracker import delete_holding
 
 deleted = delete_holding("SPY", "AAPL")
+print(deleted)
+```
+
+Delete all holdings for one or more ETFs:
+
+```python
+from etftracker import delete_etf_holdings
+
+deleted = delete_etf_holdings(["SPY", "VTI"])
+print(deleted)
+```
+
+Delete every holding row in the database:
+
+```python
+from etftracker import delete_all_holdings
+
+deleted = delete_all_holdings()
 print(deleted)
 ```
 
@@ -77,9 +127,41 @@ df = pipeline("SPY")
 save_holdings(df, "SPY")
 ```
 
+For a quick script entry point, the repository also includes `main.py`, but the
+packaged interface is the `etftracker` command above.
+
 ## Data Model
 
-The normalized holdings table includes:
+The DuckDB schema stores company metadata once:
+
+```sql
+CREATE TABLE companies (
+    symbol TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
+```
+
+ETF holdings reference those company symbols and keep one row per ETF, scrape
+timestamp, and holding symbol:
+
+```sql
+CREATE TABLE etf_holdings (
+    etf_ticker TEXT NOT NULL,
+    collected_at TIMESTAMP NOT NULL,
+    symbol TEXT NOT NULL,
+    weight TEXT,
+    weight_pct DOUBLE,
+    shares_owned TEXT,
+    shares_owned_num DOUBLE,
+    shares_value TEXT,
+    shares_value_num DOUBLE,
+    PRIMARY KEY (etf_ticker, collected_at, symbol),
+    FOREIGN KEY (symbol) REFERENCES companies(symbol)
+);
+```
+
+`read_holdings()` returns the latest snapshot joined with company names. The
+returned dataframe includes:
 
 - `etf_ticker`
 - `collected_at`

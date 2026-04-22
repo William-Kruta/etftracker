@@ -47,9 +47,17 @@ def _expand_table(driver, xpath: str = "//a[@perpage='60']"):
     show_items.click()
 
 
-def _create_driver(options: Options = None, wait_time: int = 5):
+def _create_driver(
+    options: Options = None, wait_time: int = 5, headless: bool = False
+):
     if options is None:
         options = Options()
+    if headless:
+        # Firefox is more reliable when headless mode is set explicitly.
+        options.add_argument("-headless")
+        options.add_argument("--width=1920")
+        options.add_argument("--height=1080")
+        options.headless = True
     driver = webdriver.Firefox(options=options)
     driver.implicitly_wait(wait_time)
     wait = WebDriverWait(driver, 30, poll_frequency=1)
@@ -76,10 +84,12 @@ def _next_page(driver: webdriver, page_index: int, pages_per_row: int = 6):
     return True
 
 
-def pipeline(etf_symbol: str, wait_time: int = 5, debug: bool = True) -> pd.DataFrame:
+def pipeline(
+    etf_symbol: str, wait_time: int = 5, debug: bool = True, headless: bool = False
+) -> pd.DataFrame:
     ### Step 1 ###
     # Create a driver object.
-    driver, wait = _create_driver(wait_time=wait_time)
+    driver, wait = _create_driver(wait_time=wait_time, headless=headless)
     url = (
         "https://www.schwab.wallst.com/schwab/Prospect/research/etfs/schwabETF"
         "/index.asp?type=holdings&symbol={}".format(etf_symbol)
@@ -87,7 +97,6 @@ def pipeline(etf_symbol: str, wait_time: int = 5, debug: bool = True) -> pd.Data
     driver.get(url)
 
     data = []
-    max_pages_per_row = 6
     total_index = 0
     batch_size = 60
     cur_page = 1
@@ -108,11 +117,9 @@ def pipeline(etf_symbol: str, wait_time: int = 5, debug: bool = True) -> pd.Data
             data.append(table)
             time.sleep(1)
             # Step to the next page.
+            _next_page(driver=driver, page_index=cur_page)
             cur_page += 1
             total_index += 1
-            _next_page(driver=driver, page_index=cur_page)
-            if cur_page % max_pages_per_row == 0:
-                cur_page = 1
         except NoSuchElementException:
             break
         except ElementClickInterceptedException as e:
@@ -131,7 +138,7 @@ def pipeline(etf_symbol: str, wait_time: int = 5, debug: bool = True) -> pd.Data
     df = pd.DataFrame(
         rows, columns=["symbol", "name", "weight", "shares_owned", "shares_value"]
     )
-    df = df[df["symbol"]]
+    df = df.loc[df["symbol"].notna() & df["symbol"].astype(str).str.strip().ne("")]
     driver.close()
     return df
 
